@@ -34,6 +34,7 @@ public abstract class BaseDownloadService : IDownloadService
 
     protected readonly ConcurrentDictionary<string, DownloadInfo> ActiveDownloads = new();
     protected readonly SemaphoreSlim DownloadLock;
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _songLocks = new();
 
     // Small in-memory cache to avoid repeated metadata/network lookups when searching for cached files.
     // Key: "{provider}|{externalId}" -> (path or null, expiry)
@@ -95,8 +96,9 @@ public abstract class BaseDownloadService : IDownloadService
         _serviceProvider = serviceProvider;
         Logger = logger;
 
-        DownloadLock = new(SubsonicSettings.MaxConcurrentDownloads, SubsonicSettings.MaxConcurrentDownloads);
-        
+        var maxConcurrentDownloads = Math.Clamp(SubsonicSettings.MaxConcurrentDownloads, 1, SubsonicSettings.MaxConcurrentDownloadsLimit);
+        DownloadLock = new(maxConcurrentDownloads, maxConcurrentDownloads);
+
         CachePath = PathHelper.GetCachePath();
 
         if (!Directory.Exists(CachePath))
@@ -495,19 +497,20 @@ public abstract class BaseDownloadService : IDownloadService
         // In Cache mode, downloads go to cache unless forcePermanent is set (used by star album/playlist)
         var isCache = SubsonicSettings.StorageMode == StorageMode.Cache && !forcePermanent;
 
-        // Since we can now run multiple concurrent downloads, it could happen that the same song gets requested twice, if so we should just "ignore" the second request for download.
-        if (ActiveDownloads.TryGetValue(songId, out var downloadInfo))
+        // A second request for the same song waits for the first one, then finds the downloaded file.
+        // The song lock is taken before a download slot so waiting requests don't hold a slot.
+        var songLock = _songLocks.GetOrAdd(songId, _ => new SemaphoreSlim(1, 1));
+        await songLock.WaitAsync(cancellationToken);
+        try
         {
-            if (downloadInfo is { Status: DownloadStatus.Completed, LocalPath: not null })
-            {
-                return downloadInfo.LocalPath!;
-            }
-
-            throw new Exception($"Song '{songId}' is already downloaded"); // Couldn't think of anything better on the quick
+            // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
+            await DownloadLock.WaitAsync(cancellationToken);
         }
-        
-        // Acquire lock BEFORE checking existence to prevent race conditions with concurrent requests
-        await DownloadLock.WaitAsync(cancellationToken);
+        catch
+        {
+            songLock.Release();
+            throw;
+        }
 
         // Tell other concurrent tasks we are started downloading routine
         // and keep reference to it for easy access
@@ -716,6 +719,7 @@ public abstract class BaseDownloadService : IDownloadService
             }
 
             DownloadLock.Release();
+            songLock.Release();
         }
     }
 

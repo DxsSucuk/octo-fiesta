@@ -127,10 +127,12 @@ public class SubsonicSettings
     public DownloadMode DownloadMode { get; set; } = DownloadMode.Track;
     
     /// <summary>
-    /// Defines how many downloads can concurrently run.
+    /// Defines how many downloads can concurrently run (default: 1, max: 5).
     /// Environment variable: MAX_CONCURRENT_DOWNLOADS
     /// </summary>
     public int MaxConcurrentDownloads { get; set; } = 1;
+
+    public const int MaxConcurrentDownloadsLimit = 5;
     
     /// <summary>
     /// Music service to use (default: Deezer)
